@@ -16,7 +16,7 @@ class SyncFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        grad_input = grad_output.clone()
+        grad_input = grad_output.clone().contiguous()
         torch.distributed.all_reduce(grad_input,
                                      op=torch.distributed.ReduceOp.SUM,
                                      async_op=False)
