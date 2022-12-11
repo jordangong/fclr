@@ -83,8 +83,8 @@ class ImageNetLMDB(ImageFolderLMDB):
         super().__init__(self.split_folder, **kwargs)
 
     @property
-    def split_folder(self) -> str:
-        return os.path.join(self.root, self.split)
+    def split_path(self) -> str:
+        return os.path.join(self.root, f"{self.split}.lmdb")
 
 
 class UnlabeledImagenetLMDB(ImageNetLMDB):
@@ -118,7 +118,7 @@ class UnlabeledImagenetLMDB(ImageNetLMDB):
 
         self.split = split
 
-        super(ImageNetLMDB, self).__init__(self.split_folder, **kwargs)
+        super(ImageNetLMDB, self).__init__(self.split_path, **kwargs)
 
         # shuffle images first
         np.random.seed(1234)

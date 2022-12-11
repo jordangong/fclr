@@ -6,6 +6,7 @@ class SyncFunction(torch.autograd.Function):
     def forward(ctx, tensor):
         ctx.batch_size = tensor.shape[0]
 
+        tensor = tensor.contiguous()
         gathered_tensor = [torch.zeros_like(tensor)
                            for _ in range(torch.distributed.get_world_size())]
 
