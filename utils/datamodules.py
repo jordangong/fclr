@@ -46,8 +46,6 @@ class ImageFolderLMDB(Dataset):
                              readonly=True, lock=False,
                              readahead=False, meminit=False)
         with self.env.begin(write=False) as txn:
-            self.length: int = pa.deserialize(txn.get(b'__len__'))
-            self.keys: list = pa.deserialize(txn.get(b'__keys__'))
             self.imgs: list = pa.deserialize(txn.get(b'__imgs__'))
             self.classes: list = pa.deserialize(txn.get(b'__classes__'))
 
@@ -55,8 +53,9 @@ class ImageFolderLMDB(Dataset):
         self.target_transform = target_transform
 
     def __getitem__(self, index):
+        key, target = self.imgs[index]
         with self.env.begin(write=False) as txn:
-            img_bytes, target = pa.deserialize(txn.get(self.keys[index]))
+            img_bytes, _ = pa.deserialize(txn.get(key))
 
         img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
 
@@ -69,7 +68,7 @@ class ImageFolderLMDB(Dataset):
         return img, target
 
     def __len__(self):
-        return self.length
+        return len(self.imgs)
 
     def __repr__(self):
         return f"{self.__class__.__name__} ({self.db_path})"
