@@ -32,6 +32,8 @@ class RandMaskedSimCLR(LightningModule):
             max_epochs: int = 100,
             dataset: str = "imagenet",
             num_classes: int = 1000,
+            size_crops: tuple[int, ...] = (224,),
+            num_crops: tuple[int, ...] = (2,),
             gaussian_blur: bool = True,
             jitter_strength: float = 1.,
             img_size: int = 224,
@@ -81,6 +83,8 @@ class RandMaskedSimCLR(LightningModule):
         # Data
         self.dataset = dataset
         self.num_classes = num_classes
+        self.size_crops = size_crops
+        self.num_crops = num_crops
         self.gaussian_blur = gaussian_blur
         self.jitter_strength = jitter_strength
 
@@ -195,30 +199,27 @@ class RandMaskedSimCLR(LightningModule):
     def shared_step(self, img):
         num_crops = len(img)
         batch_size, *_ = img[0].size()
-        patch_embed, visible_idx, proj, proj_sg = [], [], [], []
+        patch_embed, visible_idx, proj = [], [], []
         for patch_embed_, visible_idx_, proj_ in self.forward_multi_crop(img):
             patch_embed.append(patch_embed_)
             visible_idx.append(visible_idx_)
-            proj.append(proj_)
+            proj.append(proj_.view(-1, batch_size, self.proj_dim))
         reps = torch.cat([pe[:, 0, :] for pe in patch_embed])
         patch_embed = patch_embed[0][:, 1:, :]
         visible_idx = visible_idx[0]
-        proj = torch.cat(proj, dim=1)
-        proj = proj.view(batch_size, num_crops, self.proj_dim)
+        proj = torch.cat(proj).transpose(0, 1)
 
         if self.ema_momentum > 0:
+            proj_sg = []
             with torch.no_grad():
                 for _, _, proj_ in self.forward_multi_crop(img):
-                    proj_sg.append(proj_)
-            proj_sg = torch.cat(proj_sg, dim=1)
-            proj_sg = proj_sg.view(batch_size, num_crops, self.proj_dim)
-
-            proj = torch.cat((proj, proj_sg), dim=1)
+                    proj_sg.append(proj_.view(-1, batch_size, self.proj_dim))
+            proj_sg = torch.cat(proj_sg).transpose(0, 1)
+            proj = torch.cat((proj, proj_sg))
 
         loss_clr = multi_view_info_nce_loss(proj, self.temperature)
 
         loss_cov_reg = multi_view_cov_reg_loss(proj, self.cov_reg_norm)
-
         loss = loss_clr + self.cov_reg_coeff * loss_cov_reg
 
         loss_pos_recon = 0.
