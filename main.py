@@ -17,7 +17,7 @@ from torchmetrics import Accuracy
 
 from models import SimCLRMaskedViT, PosReconHead
 from utils.criteria import multi_view_info_nce_loss, multi_view_cov_reg_loss
-from utils.datamodules import FewShotImagenetDataModule
+from utils.datamodules import FewShotImagenetDataModule, FewShotImagenetLMDBDataModule, ImagenetLMDBDataModule
 from utils.lr_wt_decay import param_groups_lrd, exclude_from_wt_decay
 from utils.transforms import SimCLRPretrainPostTransform, imagenet_normalization, MultiCropPretrainPreTransform
 
@@ -197,7 +197,6 @@ class RandMaskedSimCLR(LightningModule):
             yield self.siamese_net(img_, self.position, self.shuffle, mask_ratio)
 
     def shared_step(self, img):
-        num_crops = len(img)
         batch_size, *_ = img[0].size()
         patch_embed, visible_idx, proj = [], [], []
         for patch_embed_, visible_idx_, proj_ in self.forward_multi_crop(img):
@@ -356,6 +355,8 @@ class RandMaskedSimCLR(LightningModule):
         # transform params
         parser.add_argument("--dataset", type=str, default="imagenet",
                             help="dataset")
+        parser.add_argument("--lmdb", default=False, action='store_true',
+                            help="use LMDB dataset")
         parser.add_argument("--data_dir", type=str, default="dataset",
                             help="path to dataset")
         parser.add_argument("--sample_pct", type=int, default=100,
@@ -457,18 +458,26 @@ if __name__ == '__main__':
 
     if args.dataset == "imagenet":
         if args.sample_pct < 100:
-            dm = FewShotImagenetDataModule(args.data_dir,
-                                           label_pct=args.sample_pct,
-                                           batch_size=args.batch_size,
-                                           num_workers=args.num_workers)
+            if args.lmdb:
+                dm = FewShotImagenetLMDBDataModule
+            else:
+                dm = FewShotImagenetDataModule
+            dm = dm(args.data_dir,
+                    label_pct=args.sample_pct,
+                    batch_size=args.batch_size,
+                    num_workers=args.num_workers)
         else:
-            dm = ImagenetDataModule(data_dir=args.data_dir,
-                                    batch_size=args.batch_size,
-                                    num_workers=args.num_workers)
-        args.num_samples = dm.num_samples
-        args.num_classes = 1000
+            if args.lmdb:
+                dm = ImagenetLMDBDataModule
+            else:
+                dm = ImagenetDataModule
+            dm = dm(data_dir=args.data_dir,
+                    batch_size=args.batch_size,
+                    num_workers=args.num_workers)
     else:
         raise NotImplementedError(f"Unimplemented dataset: {args.dataset}")
+    args.num_samples = dm.num_samples
+    args.num_classes = dm.num_classes
 
     dm.train_transforms = dm.val_transforms = MultiCropPretrainPreTransform(
         args.size_crops, args.num_crops, args.min_scale_crops, args.max_scale_crops
