@@ -192,8 +192,9 @@ class RandMaskedSimCLR(LightningModule):
         for i, (start_index, end_index) in enumerate(zip(start_indices, end_indices)):
             # Assume global crop at first
             mask_ratio = self.mask_ratio if i == 0 else 0.
-            img_ = torch.cat(img[start_index:end_index])
-            img_ = self.transform(img_)
+            img_ = torch.cat([
+                self.transform(i) for i in img[start_index:end_index]
+            ])
             yield self.siamese_net(img_, self.position, self.shuffle, mask_ratio)
 
     def shared_step(self, img):
