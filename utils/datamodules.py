@@ -248,6 +248,10 @@ class ImagenetLMDBDataModule(ImagenetDataModule):
         )
         return loader
 
+class Imagenet25pctLMDBDataModule(ImagenetLMDBDataModule):
+    def __init__(self, *args, num_imgs_per_val_class=50, **kwargs):
+        super().__init__(*args, num_imgs_per_val_class=50, **kwargs)
+        self.num_samples = 357000 - self.num_imgs_per_val_class * self.num_classes
 
 class FewShotImagenetDataModule(ImagenetDataModule):
     name = "few-shot-imagenet"
