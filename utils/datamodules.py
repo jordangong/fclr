@@ -249,7 +249,7 @@ class ImagenetLMDBDataModule(ImagenetDataModule):
         return loader
 
 
-class FewShotImagenetDataModule(ImagenetDataModule):
+class FewShotImagenetDataModule(ImagenetLMDBDataModule):
     name = "few-shot-imagenet"
 
     def __init__(self, *args, label_pct: int = 1, **kwargs):
