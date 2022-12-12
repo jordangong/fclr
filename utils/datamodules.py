@@ -249,7 +249,7 @@ class ImagenetLMDBDataModule(ImagenetDataModule):
         return loader
 
 
-class FewShotImagenetDataModule(ImagenetLMDBDataModule):
+class FewShotImagenetDataModule(ImagenetDataModule):
     name = "few-shot-imagenet"
 
     def __init__(self, *args, label_pct: int = 1, **kwargs):
@@ -294,7 +294,7 @@ class FewShotImagenetDataModule(ImagenetLMDBDataModule):
         return loader
 
 
-class FewShotImagenetLMDBDataModule(FewShotImagenetDataModule):
+class FewShotImagenetLMDBDataModule(ImagenetLMDBDataModule, FewShotImagenetDataModule):
     def train_dataloader(self) -> DataLoader:
         """
         Uses the train split of imagenet2012, puts away a portion of it
