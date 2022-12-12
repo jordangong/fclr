@@ -15,7 +15,8 @@ from torchmetrics import Accuracy
 
 from models import SimCLRResNet
 from utils.criteria import multi_view_info_nce_loss, multi_view_cov_reg_loss
-from utils.datamodules import FewShotImagenetDataModule, FewShotImagenetLMDBDataModule, ImagenetLMDBDataModule
+from utils.datamodules import FewShotImagenetDataModule, FewShotImagenetLMDBDataModule, \
+    Imagenet25pctLMDBDataModule, ImagenetLMDBDataModule
 from utils.lr_wt_decay import exclude_from_wt_decay
 from utils.transforms import SimCLRPretrainPostTransform, imagenet_normalization, MultiCropPretrainPreTransform
 
@@ -266,6 +267,8 @@ class SimCLR(LightningModule):
         # transform params
         parser.add_argument("--dataset", type=str, default="imagenet",
                             help="dataset")
+        parser.add_argument("--lmdb_25pct", default=False, action='store_true',
+                            help="use dedicated 25%% LMDB dataset")
         parser.add_argument("--lmdb", default=False, action='store_true',
                             help="use LMDB dataset")
         parser.add_argument("--data_dir", type=str, default="dataset",
@@ -334,14 +337,26 @@ if __name__ == '__main__':
 
     if args.dataset == "imagenet":
         if args.sample_pct < 100:
-            if args.lmdb:
-                dm = FewShotImagenetLMDBDataModule
-            else:
-                dm = FewShotImagenetDataModule
-            dm = dm(args.data_dir,
+            if args.lmdb_25pct:
+                dm = Imagenet25pctLMDBDataModule(
+                    data_dir=args.data_dir,
+                    batch_size=args.batch_size,
+                    num_workers=args.num_workers
+                )
+            elif args.lmdb:
+                dm = FewShotImagenetLMDBDataModule(
+                    args.data_dir,
                     label_pct=args.sample_pct,
                     batch_size=args.batch_size,
-                    num_workers=args.num_workers)
+                    num_workers=args.num_workers
+                )
+            else:
+                dm = FewShotImagenetDataModule(
+                    args.data_dir,
+                    label_pct=args.sample_pct,
+                    batch_size=args.batch_size,
+                    num_workers=args.num_workers
+                )
         else:
             if args.lmdb:
                 dm = ImagenetLMDBDataModule
