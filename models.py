@@ -14,7 +14,7 @@ class SimCLRResNet(nn.Module):
     def __init__(
             self,
             block: Callable = Bottleneck,
-            layers: tuple = (3, 4, 6, 3),
+            layers: tuple[int, ...] = (3, 4, 6, 3),
             embed_dim: int = 2048,
             proj_dim: int = 128,
     ):
@@ -31,7 +31,7 @@ class SimCLRResNet(nn.Module):
             nn.Linear(embed_dim, proj_dim),
         )
 
-    def forward(self, img, position=True, shuffle=False):
+    def forward(self, img):
         # img: [batch_size(*2), in_chans, height, weight]
         embed = self.encoder(img)[0]
         # embed: [batch_size*2, embed_dim]

@@ -1,7 +1,5 @@
 import copy
 from argparse import ArgumentParser, BooleanOptionalAction
-from functools import partial
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -15,14 +13,14 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from torch import nn
 from torchmetrics import Accuracy
 
-from models import SimCLRMaskedViT, PosReconHead
+from models import SimCLRResNet
 from utils.criteria import multi_view_info_nce_loss, multi_view_cov_reg_loss
 from utils.datamodules import FewShotImagenetDataModule, FewShotImagenetLMDBDataModule, ImagenetLMDBDataModule
-from utils.lr_wt_decay import param_groups_lrd, exclude_from_wt_decay
+from utils.lr_wt_decay import exclude_from_wt_decay
 from utils.transforms import SimCLRPretrainPostTransform, imagenet_normalization, MultiCropPretrainPreTransform
 
 
-class RandMaskedSimCLR(LightningModule):
+class SimCLR(LightningModule):
     def __init__(
             self,
             num_samples: int,
@@ -37,29 +35,13 @@ class RandMaskedSimCLR(LightningModule):
             gaussian_blur: bool = True,
             jitter_strength: float = 1.,
             img_size: int = 224,
-            patch_size: int = 16,
-            in_chans: int = 3,
-            embed_dim: int = 384,
-            depth: int = 12,
-            num_heads: int = 6,
-            mlp_ratio: int = 4,
-            mlp_drop_rate: float = 0.,
-            attention_drop_rate: float = 0.,
-            drop_path_rate: float = 0.,
-            layer_decay: float = 1.,
-            weight_sharing: Optional[str] = None,
-            position: bool = True,
-            shuffle: bool = False,
-            mask_ratio: float = 0.75,
+            layers: tuple = (3, 4, 6, 3),
+            embed_dim: int = 2048,
             ema_momentum: float = 0.,
-            mask_ratio_sg: float = 0.75,
             proj_dim: int = 128,
             temperature: float = 0.1,
             cov_reg_norm: bool = False,
             cov_reg_coeff: float = 0.,
-            pos_recon_depth: int = 0,
-            pos_recon_num_heads: int = 6,
-            pos_recon_coeff: float = 0.,
             optimizer: str = "adamw",
             learning_rate: float = 1e-3,
             weight_decay: float = 0.05,
@@ -67,7 +49,7 @@ class RandMaskedSimCLR(LightningModule):
             warmup_epochs: int = 10,
             **kwargs
     ):
-        super(RandMaskedSimCLR, self).__init__()
+        super(SimCLR, self).__init__()
         self.save_hyperparameters()
 
         # Training
@@ -88,38 +70,17 @@ class RandMaskedSimCLR(LightningModule):
         self.gaussian_blur = gaussian_blur
         self.jitter_strength = jitter_strength
 
-        # ViT params
-        self.img_size = img_size
-        self.patch_size = patch_size
-        self.in_chans = in_chans
-        self.embed_dim = embed_dim
-        self.depth = depth
-        self.num_heads = num_heads
-        self.mlp_ratio = mlp_ratio
-        self.weight_sharing = weight_sharing
-        # Regularization
-        self.mlp_drop_rate = mlp_drop_rate
-        self.attention_drop_rate = attention_drop_rate
-        self.drop_path_rate = drop_path_rate
-        self.layer_decay = layer_decay
+        # ResNet params
+        self.layers = layers
 
-        # FCLR params
-        self.position = position
-        self.shuffle = shuffle
-        self.mask_ratio = mask_ratio
+        # SimCLR params
         self.ema_momentum = ema_momentum
-        self.mask_ratio_sg = mask_ratio_sg
         self.proj_dim = proj_dim
         self.temperature = temperature
 
         # CovReg
         self.cov_reg_norm = cov_reg_norm
         self.cov_reg_coeff = cov_reg_coeff
-
-        # PosRecon
-        self.pos_recon_depth = pos_recon_depth
-        self.pos_recon_num_heads = pos_recon_num_heads
-        self.pos_recon_coeff = pos_recon_coeff
 
         # Optimizer
         self.optim = optimizer
@@ -140,29 +101,9 @@ class RandMaskedSimCLR(LightningModule):
         )
 
         # Modules
-        self.siamese_net = SimCLRMaskedViT(
-            img_size,
-            patch_size,
-            in_chans,
-            embed_dim,
-            depth,
-            num_heads,
-            mlp_ratio,
-            proj_dim,
-            mlp_drop_rate,
-            attention_drop_rate,
-            drop_path_rate,
-            norm_layer=partial(nn.LayerNorm, eps=1e-6),
-            weight_sharing=weight_sharing,
-        )
+        self.siamese_net = SimCLRResNet(layers=layers, proj_dim=proj_dim)
         if ema_momentum > 0:
             self.siamese_net_sg = copy.deepcopy(self.siamese_net)
-        if pos_recon_coeff > 0:
-            self.pos_recon_head = PosReconHead(
-                embed_dim,
-                pos_recon_depth,
-                pos_recon_num_heads
-            )
         self.classifier = nn.Linear(embed_dim, num_classes)
 
         # Online metrics
@@ -190,23 +131,18 @@ class RandMaskedSimCLR(LightningModule):
         end_indices = img_sizes.unique_consecutive(return_counts=True)[-1].cumsum(0)
         start_indices = torch.cat((torch.tensor([0]), end_indices[:-1]))
         for i, (start_index, end_index) in enumerate(zip(start_indices, end_indices)):
-            # Assume global crop at first
-            mask_ratio = self.mask_ratio if i == 0 else 0.
             img_ = torch.cat([
                 self.transform(i) for i in img[start_index:end_index]
             ])
-            yield self.siamese_net(img_, self.position, self.shuffle, mask_ratio)
+            yield self.siamese_net(img_)
 
     def shared_step(self, img):
         batch_size, *_ = img[0].size()
-        patch_embed, visible_idx, proj = [], [], []
-        for patch_embed_, visible_idx_, proj_ in self.forward_multi_crop(img):
-            patch_embed.append(patch_embed_)
-            visible_idx.append(visible_idx_)
+        reps, proj = [], []
+        for reps_, proj_ in self.forward_multi_crop(img):
+            reps.append(reps_)
             proj.append(proj_.view(-1, batch_size, self.proj_dim))
-        reps = torch.cat([pe[:, 0, :] for pe in patch_embed])
-        patch_embed = patch_embed[0][:, 1:, :]
-        visible_idx = visible_idx[0]
+        reps = torch.cat(reps)
         proj = torch.cat(proj).transpose(0, 1)
 
         if self.ema_momentum > 0:
@@ -222,19 +158,9 @@ class RandMaskedSimCLR(LightningModule):
         loss_cov_reg = multi_view_cov_reg_loss(proj, self.cov_reg_norm)
         loss = loss_clr + self.cov_reg_coeff * loss_cov_reg
 
-        loss_pos_recon = 0.
-        if self.pos_recon_coeff > 0:
-            pos_embed = self.siamese_net.pos_embed.expand(patch_embed.size(0), -1, -1)
-            if visible_idx is not None:
-                pos_embed = pos_embed.gather(1, visible_idx)
-            pos_embed_pred = self.pos_recon_head(patch_embed)
-            loss_pos_recon = F.mse_loss(pos_embed_pred, pos_embed)
-            loss += self.pos_recon_coeff * loss_pos_recon
-
         return reps, proj, {
             "clr": loss_clr,
             "cov_reg": loss_cov_reg,
-            "pos_recon": loss_pos_recon,
             "all": loss,
         }
 
@@ -258,7 +184,6 @@ class RandMaskedSimCLR(LightningModule):
         self.log_dict({
             'loss/clr/train': losses["clr"],
             'loss/cov_reg/train': losses["cov_reg"],
-            'loss/pos_recon/train': losses["pos_recon"],
             'loss/pretrain/train': losses["all"],
             'loss/linear_probe/train': loss_xent,
             'acc/linear_probe_top_1/train': acc_top_1,
@@ -279,7 +204,6 @@ class RandMaskedSimCLR(LightningModule):
         self.log_dict({
             'loss/clr/val': losses["clr"],
             'loss/cov_reg/val': losses["cov_reg"],
-            'loss/pos_recon/val': losses["pos_recon"],
             'loss/pretrain/val': losses["all"],
             'loss/linear_probe/val': loss_xent,
             'acc/linear_probe_top_1/val': acc_top_1,
@@ -288,26 +212,12 @@ class RandMaskedSimCLR(LightningModule):
         return losses["all"] + loss_xent
 
     def configure_optimizers(self):
-        param_groups = param_groups_lrd(
-            self.siamese_net,
-            lr=self.learning_rate,
-            weight_decay=self.weight_decay,
-            exclude_1d_params=self.exclude_bn_bias,
-            no_weight_decay_list=("pos_embed", "cls_token"),
-            layer_decay=self.layer_decay
-        )
         if self.exclude_bn_bias:
-            param_groups += exclude_from_wt_decay(self.classifier, self.weight_decay)
-            if self.pos_recon_coeff > 0:
-                param_groups += exclude_from_wt_decay(self.pos_recon_head, self.weight_decay)
+            param_groups = exclude_from_wt_decay(self, self.weight_decay)
         else:
-            param_groups += [
-                {"params": self.classifier.parameters(), "weight_decay": self.weight_decay}
+            param_groups = [
+                {"params": self.parameters(), "weight_decay": self.weight_decay}
             ]
-            if self.pos_recon_coeff > 0:
-                param_groups += [
-                    {"params": self.pos_recon_head.parameters(), "weight_decay": self.weight_decay}
-                ]
 
         if self.optim == "lars":
             optimizer = optim.LARS(param_groups, lr=self.learning_rate, momentum=0.9)
@@ -378,41 +288,13 @@ class RandMaskedSimCLR(LightningModule):
         # model params
         parser.add_argument("--img_size", default=224, type=int,
                             help="input image size")
-        parser.add_argument("--patch_size", default=16, type=int,
-                            help="patch size")
-        parser.add_argument("--in_chans", default=3, type=int,
-                            help="number of in channels")
-        parser.add_argument("--embed_dim", default=384, type=int,
+        parser.add_argument("--layers", default=(3, 4, 6, 3), type=int, nargs="+",
+                            help="ResNet layers")
+        parser.add_argument("--embed_dim", default=2048, type=int,
                             help="embedding dimension")
-        parser.add_argument("--depth", default=12, type=int,
-                            help="number of Transformer blocks")
-        parser.add_argument("--num_heads", default=6, type=int,
-                            help="number of self-attention heads")
-        parser.add_argument("--mlp_ratio", default=4, type=int,
-                            help="Ratio of embedding dim to MLP dim")
-        parser.add_argument("--weight_sharing", default=None, type=str,
-                            help="ALBERT-style weight sharing, "
-                                 "choose from None, attn, ffn, or all")
-        # regularization
-        parser.add_argument("--layer_decay", default=1., type=float,
-                            help="layer-wise decay")
-        parser.add_argument("--mlp_drop_rate", default=0.0, type=float,
-                            help="mlp dropout rate")
-        parser.add_argument("--attention_drop_rate", default=0.0, type=float,
-                            help="attention dropout rate")
-        parser.add_argument("--drop_path_rate", default=0.0, type=float,
-                            help="path dropout rate")
-        # FCLR
-        parser.add_argument("--position", default=True, action=BooleanOptionalAction,
-                            help="add positional embedding or not")
-        parser.add_argument("--shuffle", default=False, action='store_true',
-                            help="shuffle positional embedding or not")
-        parser.add_argument("--mask_ratio", default=0.75, type=float,
-                            help="mask ratio of patches")
+        # SimCLR
         parser.add_argument("--ema_momentum", default=0., type=float,
                             help="ema momentum")
-        parser.add_argument("--mask_ratio_sg", default=0.75, type=float,
-                            help="mask ratio of patches on target branch")
         parser.add_argument("--proj_dim", default=128, type=int,
                             help="projection head output dimension")
         parser.add_argument("--temperature", default=0.1, type=float,
@@ -422,13 +304,6 @@ class RandMaskedSimCLR(LightningModule):
                             help="use correlation instead of covariance")
         parser.add_argument("--cov_reg_coeff", default=0., type=float,
                             help="coefficient on covariance regularization loss")
-        # PosRecon
-        parser.add_argument("--pos_recon_depth", default=0, type=int,
-                            help="depth of PosRecon head, 0 for linear layer")
-        parser.add_argument("--pos_recon_num_heads", default=6, type=int,
-                            help="number of attention heads in PosRecon head")
-        parser.add_argument("--pos_recon_coeff", default=0., type=float,
-                            help="coefficient on position reconstruction loss")
 
         # Optimizer
         parser.add_argument("--optimizer", default="adamw", type=str,
@@ -454,7 +329,7 @@ if __name__ == '__main__':
     parser.add_argument("--resume_ckpt_path", default=None, type=str)
     parser.add_argument("--track_grad", default=True, action=BooleanOptionalAction)
     parser.add_argument("--knn_probe", default=False, action='store_true')
-    parser = RandMaskedSimCLR.add_model_specific_args(parser)
+    parser = SimCLR.add_model_specific_args(parser)
     args = parser.parse_args()
 
     if args.dataset == "imagenet":
@@ -484,7 +359,7 @@ if __name__ == '__main__':
         args.size_crops, args.num_crops, args.min_scale_crops, args.max_scale_crops
     )
 
-    model = RandMaskedSimCLR(**args.__dict__)
+    model = SimCLR(**args.__dict__)
 
     logger = TensorBoardLogger(args.log_path, name="pretrain", version=args.version)
     lr_monitor = LearningRateMonitor(logging_interval="step")

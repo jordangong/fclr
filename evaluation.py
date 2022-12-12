@@ -13,7 +13,7 @@ from timm.loss.cross_entropy import SoftTargetCrossEntropy
 from torch import nn
 from torchvision import transforms
 
-from main import RandMaskedSimCLR
+from main import SimCLR
 from models import SimCLRViT
 from utils.datamodules import FewShotImagenetDataModule, CIFAR100DataModule, \
     Flowers102DataModule, OxfordIIITPetDataModule
@@ -304,7 +304,7 @@ if __name__ == "__main__":
     parser = CLREvaluator.add_model_specific_args(parser)
     args = parser.parse_args()
 
-    pretrained = RandMaskedSimCLR.load_from_checkpoint(args.ckpt_path, strict=False)
+    pretrained = SimCLR.load_from_checkpoint(args.ckpt_path, strict=False)
     # a bit hacky here, replace ViT with dropout rate
     pretained_state_dict = pretrained.state_dict()
     pretrained.siamese_net = SimCLRViT(
