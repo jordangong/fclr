@@ -38,12 +38,15 @@ def info_nce_loss(feat1, feat2, temp, eps=1e-6):
 
 
 def multi_view_info_nce_loss(proj, temp):
+    batch_size, num_crops, proj_dim = proj.size()
+    if num_crops == 2:
+        info_nce_loss(proj[:, 0, :], proj[:, 1, :], temp)
+
     # InfoNCE with multiple positive pairs
     proj = F.normalize(proj, dim=-1)
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         proj = SyncFunction.apply(proj)
     # proj: [batch_size (* world_size), num_crops, proj_dim]
-    batch_size, num_crops, proj_dim = proj.size()
 
     pos_sim = proj @ proj.transpose(1, 2)
     pos_sim = pos_sim.masked_select(~torch.eye(
