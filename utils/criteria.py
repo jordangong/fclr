@@ -55,11 +55,11 @@ def multi_view_info_nce_loss(proj, temp):
     pos_sim = pos_sim.view(batch_size * num_crops, -1)
     pos = torch.exp(pos_sim / temp)
 
-    neg_sim = []
-    for pos_idx in torch.eye(batch_size, dtype=torch.bool):
-        neg_sim.append(proj[pos_idx].squeeze(0)
-                       @ proj[~pos_idx].view(-1, proj_dim).T)
-    neg_sim = torch.stack(neg_sim).view(batch_size * num_crops, -1)
+    neg_proj = torch.stack([
+        proj[neg_idx].view(-1, proj_dim)
+        for neg_idx in ~torch.eye(batch_size, dtype=torch.bool)
+    ])
+    neg_sim = (proj @ neg_proj.transpose(1, 2)).view(batch_size * num_crops, -1)
     neg = torch.exp(neg_sim / temp).sum(-1)
 
     all_ = pos + neg.unsqueeze(-1)
