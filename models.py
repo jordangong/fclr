@@ -22,6 +22,7 @@ class SimCLRResNet(nn.Module):
 
         # Encoder
         self.encoder = ResNet(block, layers)
+        del self.encoder.fc
 
         # Projection head
         self.proj_head = nn.Sequential(
