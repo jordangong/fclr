@@ -46,6 +46,7 @@ def multi_view_info_nce_loss(proj, temp):
     proj = F.normalize(proj, dim=-1)
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         proj = SyncFunction.apply(proj)
+        batch_size = proj.size(0)
     # proj: [batch_size (* world_size), num_crops, proj_dim]
 
     pos_sim = proj @ proj.transpose(1, 2)
