@@ -59,6 +59,7 @@ class RandMaskedSimCLR(LightningModule):
             pos_recon_depth: int = 0,
             pos_recon_num_heads: int = 6,
             pos_recon_coeff: float = 0.,
+            pos_recon_loss: str = "mse",
             optimizer: str = "adamw",
             learning_rate: float = 1e-3,
             weight_decay: float = 0.05,
@@ -119,6 +120,7 @@ class RandMaskedSimCLR(LightningModule):
         self.pos_recon_depth = pos_recon_depth
         self.pos_recon_num_heads = pos_recon_num_heads
         self.pos_recon_coeff = pos_recon_coeff
+        self.pos_recon_loss = pos_recon_loss
 
         # Optimizer
         self.optim = optimizer
@@ -162,6 +164,14 @@ class RandMaskedSimCLR(LightningModule):
                 pos_recon_depth,
                 pos_recon_num_heads
             )
+        if pos_recon_loss in {'mse', 'l2'}:
+            self.pos_recon_criterion = nn.MSELoss()
+        elif pos_recon_loss in {'mae', 'l1'}:
+            self.pos_recon_criterion = nn.L1Loss()
+        elif pos_recon_loss == 'smooth_l1':
+            self.pos_recon_criterion = nn.SmoothL1Loss()
+        else:
+            raise NotImplementedError(f"Unknown PosRecon loss: {pos_recon_loss}")
         self.classifier = nn.Linear(embed_dim, num_classes)
 
         # Online metrics
@@ -196,6 +206,15 @@ class RandMaskedSimCLR(LightningModule):
             ])
             yield self.siamese_net(img_, self.position, self.shuffle, mask_ratio)
 
+    def position_reconstruction(self, patch_embed, visible_idx):
+        pos_embed = self.siamese_net.pos_embed.expand(patch_embed.size(0), -1, -1)
+        if visible_idx is not None:
+            pos_embed = pos_embed.gather(1, visible_idx)
+        pos_embed_pred = self.pos_recon_head(patch_embed)
+        loss_pos_recon = self.pos_recon_criterion(pos_embed_pred, pos_embed)
+
+        return loss_pos_recon
+
     def shared_step(self, img):
         batch_size, *_ = img[0].size()
         patch_embed, visible_idx, proj = [], [], []
@@ -223,11 +242,7 @@ class RandMaskedSimCLR(LightningModule):
 
         loss_pos_recon = 0.
         if self.pos_recon_coeff > 0:
-            pos_embed = self.siamese_net.pos_embed.expand(patch_embed.size(0), -1, -1)
-            if visible_idx is not None:
-                pos_embed = pos_embed.gather(1, visible_idx)
-            pos_embed_pred = self.pos_recon_head(patch_embed)
-            loss_pos_recon = F.mse_loss(pos_embed_pred, pos_embed)
+            loss_pos_recon = self.position_reconstruction(patch_embed, visible_idx)
             loss += self.pos_recon_coeff * loss_pos_recon
 
         return reps, proj, {
@@ -430,6 +445,8 @@ class RandMaskedSimCLR(LightningModule):
                             help="number of attention heads in PosRecon head")
         parser.add_argument("--pos_recon_coeff", default=0., type=float,
                             help="coefficient on position reconstruction loss")
+        parser.add_argument("--pos_recon_loss", default='mse', type=str,
+                            help="type of position reconstruction loss")
 
         # Optimizer
         parser.add_argument("--optimizer", default="adamw", type=str,
