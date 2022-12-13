@@ -1,5 +1,6 @@
 import io
 import os
+from functools import partial
 from typing import Any, Callable, Optional
 
 import lmdb
@@ -248,10 +249,12 @@ class ImagenetLMDBDataModule(ImagenetDataModule):
         )
         return loader
 
+
 class Imagenet25pctLMDBDataModule(ImagenetLMDBDataModule):
     def __init__(self, *args, num_imgs_per_val_class=50, **kwargs):
         super().__init__(*args, num_imgs_per_val_class=50, **kwargs)
         self.num_samples = 357000 - self.num_imgs_per_val_class * self.num_classes
+
 
 class FewShotImagenetDataModule(ImagenetDataModule):
     name = "few-shot-imagenet"
@@ -326,6 +329,23 @@ class FewShotImagenetLMDBDataModule(ImagenetLMDBDataModule, FewShotImagenetDataM
         )
 
         return loader
+
+
+def build_imagenet(sample_pct=100, lmdb=False, lmdb_25pct=False):
+    if sample_pct < 100:
+        if lmdb_25pct:
+            dm = Imagenet25pctLMDBDataModule
+        elif lmdb:
+            dm = partial(FewShotImagenetLMDBDataModule, label_pct=sample_pct)
+        else:
+            dm = partial(FewShotImagenetDataModule, label_pct=sample_pct)
+    else:
+        if lmdb:
+            dm = ImagenetLMDBDataModule
+        else:
+            dm = ImagenetDataModule
+
+    return dm
 
 
 class CIFAR100DataModule(CIFAR10DataModule):
