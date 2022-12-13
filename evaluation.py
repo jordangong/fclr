@@ -1,5 +1,4 @@
 from argparse import ArgumentParser, BooleanOptionalAction
-from functools import partial
 
 import torch
 from pl_bolts.datamodules import CIFAR10DataModule
@@ -15,10 +14,9 @@ from torchmetrics import Accuracy
 from torchvision import transforms
 
 from main import SimCLR
-from models import SimCLRViT
 from utils.datamodules import CIFAR100DataModule, \
     Flowers102DataModule, OxfordIIITPetDataModule, build_imagenet
-from utils.lr_wt_decay import param_groups_lrd, exclude_from_wt_decay
+from utils.lr_wt_decay import exclude_from_wt_decay
 from utils.transforms import SimCLRFinetuneTransform, imagenet_normalization, \
     cifar10_normalization, cifar100_normalization, flower102_normalization, \
     oxford_iiit_pet_normalization
@@ -37,7 +35,6 @@ class CLREvaluator(SSLFineTuner):
             mixup_alpha: float = 0.,
             cutmix_alpha: float = 0.,
             label_smoothing: float = 0.,
-            layer_decay: float = 1.,
             **kwargs
     ):
         """
@@ -52,7 +49,6 @@ class CLREvaluator(SSLFineTuner):
             mixup_alpha: mixup alpha, active if > 0.
             cutmix_alpha: cutmix alpha, active if > 0.
             label_smoothing: label smoothing regularization
-            layer_decay: layer-wise learning rate decay
         """
         assert protocol in {'linear', 'finetune'}, f"unknown protocol: {protocol}"
         assert optim in {'sgd', 'adam', 'adamw'}, f"unknown optimizer: {optim}"
@@ -70,7 +66,6 @@ class CLREvaluator(SSLFineTuner):
                                label_smoothing=label_smoothing,
                                num_classes=self.linear_layer.n_classes)
         self.label_smoothing = label_smoothing
-        self.layer_decay = layer_decay
         self.warmup_epochs = warmup_epochs
         self.start_lr = start_lr
 
@@ -125,7 +120,7 @@ class CLREvaluator(SSLFineTuner):
         elif self.protocol == 'finetune':
             feats, *_ = self.backbone(x)
 
-        logits = self.linear_layer(feats[:, 0, :])
+        logits = self.linear_layer(feats)
         loss = self.criterion(logits, y)
 
         return loss, logits
@@ -181,14 +176,17 @@ class CLREvaluator(SSLFineTuner):
         param_groups = []
         # add backbone to params_groups while finetuning
         if self.protocol == "finetune":
-            param_groups += param_groups_lrd(
-                self.backbone,
-                lr=self.learning_rate,
-                weight_decay=self.weight_decay,
-                exclude_1d_params=self.exclude_bn_bias,
-                no_weight_decay_list=("pos_embed", "cls_token"),
-                layer_decay=self.layer_decay
-            )
+            if self.exclude_bn_bias:
+                resnet_param_groups = exclude_from_wt_decay(
+                    self.backbone,
+                    self.weight_decay,
+                )
+            else:
+                resnet_param_groups = [{
+                    "params": self.backbone.parameters(),
+                    "weight_decay": self.weight_decay
+                }]
+            param_groups += resnet_param_groups
 
         # add linear head
         if self.exclude_bn_bias:
@@ -271,14 +269,6 @@ class CLREvaluator(SSLFineTuner):
                             help="path to ckpt")
 
         # regularization
-        parser.add_argument("--layer_decay", default=1., type=float,
-                            help="layer-wise decay")
-        parser.add_argument("--mlp_drop_rate", default=0., type=float,
-                            help="mlp dropout rate")
-        parser.add_argument("--attention_drop_rate", default=0., type=float,
-                            help="attention dropout rate")
-        parser.add_argument("--drop_path_rate", default=0., type=float,
-                            help="path dropout rate")
         parser.add_argument("--linear_head_drop_rate", default=0., type=float,
                             help="linear head dropout rate")
         parser.add_argument("--mixup_alpha", default=0., type=float,
@@ -328,24 +318,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     pretrained = SimCLR.load_from_checkpoint(args.ckpt_path, strict=False)
-    # a bit hacky here, replace ViT with dropout rate
-    pretained_state_dict = pretrained.state_dict()
-    pretrained.siamese_net = SimCLRViT(
-        pretrained.img_size,
-        pretrained.patch_size,
-        pretrained.in_chans,
-        pretrained.embed_dim,
-        pretrained.depth,
-        pretrained.num_heads,
-        pretrained.mlp_ratio,
-        pretrained.proj_dim,
-        drop_rate=args.mlp_drop_rate,
-        attention_drop_rate=args.attention_drop_rate,
-        drop_path_rate=args.drop_path_rate,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6),
-        weight_sharing=pretrained.weight_sharing,
-    )
-    pretrained.load_state_dict(pretained_state_dict)
 
     if args.dataset == "imagenet":
         dm = build_imagenet(args.sample_pct, args.lmdb, args.lmdb_25pct)
@@ -383,7 +355,6 @@ if __name__ == "__main__":
         num_classes=args.num_classes,
         epochs=args.max_epochs,
         dropout=args.linear_head_drop_rate,
-        layer_decay=args.layer_decay,
         mixup_alpha=args.mixup_alpha,
         cutmix_alpha=args.cutmix_alpha,
         label_smoothing=args.label_smoothing,
