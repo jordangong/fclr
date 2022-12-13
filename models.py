@@ -2,42 +2,10 @@ import copy
 from typing import Callable, Optional
 
 import torch
-from pl_bolts.models.self_supervised.resnets import Bottleneck, ResNet
 from timm.models.vision_transformer import Block, LayerScale, DropPath
 from torch import nn
 
 from utils.pos_embed import get_2d_sincos_pos_embed, interpolate_pos_encoding
-
-
-class SimCLRResNet(nn.Module):
-
-    def __init__(
-            self,
-            block: Callable = Bottleneck,
-            layers: tuple = (3, 4, 6, 3),
-            embed_dim: int = 2048,
-            proj_dim: int = 128,
-    ):
-        super(SimCLRResNet, self).__init__()
-
-        # Encoder
-        self.encoder = ResNet(block, layers)
-
-        # Projection head
-        self.proj_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
-            nn.BatchNorm1d(embed_dim),
-            nn.ReLU(),
-            nn.Linear(embed_dim, proj_dim),
-        )
-
-    def forward(self, img, position=True, shuffle=False):
-        # img: [batch_size(*2), in_chans, height, weight]
-        embed = self.encoder(img)[0]
-        # embed: [batch_size*2, embed_dim]
-        proj = self.proj_head(embed)
-        # proj: [batch_size*2, proj_dim]
-        return embed, proj
 
 
 class PatchEmbed(nn.Module):
