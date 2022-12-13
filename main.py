@@ -7,7 +7,6 @@ import torch
 import torch.nn.functional as F
 import torch_optimizer as optim
 from pl_bolts.callbacks.knn_online import KNNOnlineEvaluator
-from pl_bolts.datamodules import ImagenetDataModule
 from pl_bolts.optimizers import linear_warmup_decay
 from pytorch_lightning import Trainer, LightningModule, seed_everything
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
@@ -17,8 +16,7 @@ from torchmetrics import Accuracy
 
 from models import SimCLRMaskedViT, PosReconHead
 from utils.criteria import multi_view_info_nce_loss, multi_view_cov_reg_loss
-from utils.datamodules import FewShotImagenetDataModule, FewShotImagenetLMDBDataModule, \
-    Imagenet25pctLMDBDataModule, ImagenetLMDBDataModule
+from utils.datamodules import build_imagenet
 from utils.lr_wt_decay import param_groups_lrd, exclude_from_wt_decay
 from utils.transforms import SimCLRPretrainPostTransform, imagenet_normalization, MultiCropPretrainPreTransform
 
@@ -461,37 +459,12 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.dataset == "imagenet":
-        if args.sample_pct < 100:
-            if args.lmdb_25pct:
-                dm = Imagenet25pctLMDBDataModule(
-                    data_dir=args.data_dir,
-                    batch_size=args.batch_size,
-                    num_workers=args.num_workers
-                )
-            elif args.lmdb:
-                dm = FewShotImagenetLMDBDataModule(
-                    args.data_dir,
-                    label_pct=args.sample_pct,
-                    batch_size=args.batch_size,
-                    num_workers=args.num_workers
-                )
-            else:
-                dm = FewShotImagenetDataModule(
-                    args.data_dir,
-                    label_pct=args.sample_pct,
-                    batch_size=args.batch_size,
-                    num_workers=args.num_workers
-                )
-        else:
-            if args.lmdb:
-                dm = ImagenetLMDBDataModule
-            else:
-                dm = ImagenetDataModule
-            dm = dm(data_dir=args.data_dir,
-                    batch_size=args.batch_size,
-                    num_workers=args.num_workers)
+        dm = build_imagenet(args.sample_pct, args.lmdb, args.lmdb_25pct)
     else:
         raise NotImplementedError(f"Unimplemented dataset: {args.dataset}")
+    dm = dm(data_dir=args.data_dir,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers)
     args.num_samples = dm.num_samples
     args.num_classes = dm.num_classes
 

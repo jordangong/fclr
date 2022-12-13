@@ -2,7 +2,7 @@ from argparse import ArgumentParser, BooleanOptionalAction
 from functools import partial
 
 import torch
-from pl_bolts.datamodules import ImagenetDataModule, CIFAR10DataModule
+from pl_bolts.datamodules import CIFAR10DataModule
 from pl_bolts.models.self_supervised import SSLFineTuner
 from pl_bolts.optimizers import LinearWarmupCosineAnnealingLR
 from pytorch_lightning import Trainer, seed_everything
@@ -11,12 +11,13 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from timm.data.mixup import Mixup
 from timm.loss.cross_entropy import SoftTargetCrossEntropy
 from torch import nn
+from torchmetrics import Accuracy
 from torchvision import transforms
 
 from main import RandMaskedSimCLR
 from models import SimCLRViT
-from utils.datamodules import FewShotImagenetDataModule, CIFAR100DataModule, \
-    Flowers102DataModule, OxfordIIITPetDataModule
+from utils.datamodules import CIFAR100DataModule, \
+    Flowers102DataModule, OxfordIIITPetDataModule, build_imagenet
 from utils.lr_wt_decay import param_groups_lrd, exclude_from_wt_decay
 from utils.transforms import SimCLRFinetuneTransform, imagenet_normalization, \
     cifar10_normalization, cifar100_normalization, flower102_normalization, \
@@ -29,15 +30,14 @@ class CLREvaluator(SSLFineTuner):
             protocol: str = 'linear',
             dataset: str = 'imagenet',
             img_size: int = 224,
-            position: bool = True,
             optim: str = 'sgd',
+            warmup_epochs: int = 10,
+            start_lr: float = 1e-6,
             exclude_bn_bias: bool = True,
             mixup_alpha: float = 0.,
             cutmix_alpha: float = 0.,
             label_smoothing: float = 0.,
             layer_decay: float = 1.,
-            warmup_epochs: int = 10,
-            start_lr: float = 0.,
             **kwargs
     ):
         """
@@ -45,15 +45,14 @@ class CLREvaluator(SSLFineTuner):
             protocol: evaluation protocol, including `linear` and `finetune`
             dataset: name of dataset for evaluation
             img_size: input image size
-            position: add positional embedding or not
-            optim: optimizer (SGD or Adam)
+            optim: optimizer (SGD, Adam, or AdamW)
+            warmup_epochs: linear warmup epochs
+            start_lr: start learning rate
             exclude_bn_bias: exclude weight decay on 1d params (e.g. bn/ln and bias)
             mixup_alpha: mixup alpha, active if > 0.
             cutmix_alpha: cutmix alpha, active if > 0.
             label_smoothing: label smoothing regularization
             layer_decay: layer-wise learning rate decay
-            warmup_epochs: linear warmup epochs
-            start_lr: start learning rate
         """
         assert protocol in {'linear', 'finetune'}, f"unknown protocol: {protocol}"
         assert optim in {'sgd', 'adam', 'adamw'}, f"unknown optimizer: {optim}"
@@ -63,7 +62,6 @@ class CLREvaluator(SSLFineTuner):
 
         self.protocol = protocol
         self.dataset = dataset
-        self.position = position
         self.optim = optim
         self.exclude_bn_bias = exclude_bn_bias
         self.mixup = None
@@ -103,6 +101,10 @@ class CLREvaluator(SSLFineTuner):
             eval_transform=True,
         )
 
+        self.train_acc5 = Accuracy(top_k=5)
+        self.val_acc5 = Accuracy(top_k=5, compute_on_step=False)
+        self.test_acc5 = Accuracy(top_k=5, compute_on_step=False)
+
     def on_train_epoch_start(self) -> None:
         if self.protocol == 'linear':
             self.backbone.eval()
@@ -119,11 +121,11 @@ class CLREvaluator(SSLFineTuner):
         x, y = batch
         if self.protocol == 'linear':
             with torch.no_grad():
-                feats, *_ = self.backbone(x, self.position)
+                feats, *_ = self.backbone(x)
         elif self.protocol == 'finetune':
-            feats, *_ = self.backbone(x, self.position)
+            feats, *_ = self.backbone(x)
 
-        logits = self.linear_layer(feats)
+        logits = self.linear_layer(feats[:, 0, :])
         loss = self.criterion(logits, y)
 
         return loss, logits
@@ -136,10 +138,14 @@ class CLREvaluator(SSLFineTuner):
             x, y = self.mixup(x, y)
         loss, logits = self.shared_step((x, y))
         acc = self.train_acc(logits.softmax(-1), target)
+        acc5 = self.train_acc5(logits.softmax(-1), target)
 
         self.log(f"loss/xent_{self.protocol}/train", loss, prog_bar=True)
-        self.log(f"acc/{self.protocol}/train_step", acc, prog_bar=True)
-        self.log(f"acc/{self.protocol}/train_epoch", self.train_acc,
+        self.log(f"acc/{self.protocol}_top_1/train_step", acc, prog_bar=True)
+        self.log(f"acc/{self.protocol}_top_5/train_step", acc5, prog_bar=True)
+        self.log(f"acc/{self.protocol}_top_1/train_epoch", self.train_acc,
+                 on_step=False, on_epoch=True)
+        self.log(f"acc/{self.protocol}_top_5/train_epoch", self.train_acc5,
                  on_step=False, on_epoch=True)
 
         return loss
@@ -149,10 +155,12 @@ class CLREvaluator(SSLFineTuner):
         x = self.eval_transform(x)
         loss, logits = self.shared_step((x, y))
         self.val_acc(logits.softmax(-1), y)
+        self.val_acc5(logits.softmax(-1), y)
 
         self.log(f"loss/xent_{self.protocol}/val",
                  loss, prog_bar=True, sync_dist=True)
-        self.log(f"acc/{self.protocol}/val_epoch", self.val_acc)
+        self.log(f"acc/{self.protocol}_top_1/val_epoch", self.val_acc)
+        self.log(f"acc/{self.protocol}_top_5/val_epoch", self.val_acc5)
 
         return loss
 
@@ -161,9 +169,11 @@ class CLREvaluator(SSLFineTuner):
         x = self.eval_transform(x)
         loss, logits = self.shared_step((x, y))
         self.test_acc(logits.softmax(-1), y)
+        self.test_acc5(logits.softmax(-1), y)
 
         self.log(f"loss/xent_{self.protocol}/test", loss, sync_dist=True)
-        self.log(f"acc/{self.protocol}/test_epoch", self.test_acc)
+        self.log(f"acc/{self.protocol}_top_1/test_epoch", self.test_acc)
+        self.log(f"acc/{self.protocol}_top_5/test_epoch", self.test_acc5)
 
         return loss
 
@@ -171,27 +181,14 @@ class CLREvaluator(SSLFineTuner):
         param_groups = []
         # add backbone to params_groups while finetuning
         if self.protocol == "finetune":
-            if isinstance(self.backbone, SimCLRViT):
-                param_groups += param_groups_lrd(
-                    self.backbone,
-                    lr=self.learning_rate,
-                    weight_decay=self.weight_decay,
-                    exclude_1d_params=self.exclude_bn_bias,
-                    no_weight_decay_list=("pos_embed", "cls_token"),
-                    layer_decay=self.layer_decay
-                )
-            else:  # ResNet
-                if self.exclude_bn_bias:
-                    resnet_param_groups = exclude_from_wt_decay(
-                        self.backbone,
-                        self.weight_decay,
-                    )
-                else:
-                    resnet_param_groups = [{
-                        "params": self.backbone.parameters(),
-                        "weight_decay": self.weight_decay
-                    }]
-                param_groups += resnet_param_groups
+            param_groups += param_groups_lrd(
+                self.backbone,
+                lr=self.learning_rate,
+                weight_decay=self.weight_decay,
+                exclude_1d_params=self.exclude_bn_bias,
+                no_weight_decay_list=("pos_embed", "cls_token"),
+                layer_decay=self.layer_decay
+            )
 
         # add linear head
         if self.exclude_bn_bias:
@@ -239,56 +236,82 @@ class CLREvaluator(SSLFineTuner):
     def add_model_specific_args(parent_parser):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
 
-        # i/o params
-        parser.add_argument("--dataset", type=str, default="imagenet",
-                            help="dataset")
-        parser.add_argument("--data_dir", type=str, default="dataset",
-                            help="path to dataset")
-        parser.add_argument("--protocol", type=str, default="linear",
-                            choices=("linear", "finetune"),
-                            help="evalution protocol")
-        parser.add_argument("--label_pct", type=int, default=100,
-                            help="%% of labels for training")
-        parser.add_argument("--ckpt_path", type=str, help="path to ckpt")
-
         # training params
         parser.add_argument("--num_nodes", default=1, type=int,
                             help="number of nodes for training")
         parser.add_argument("--gpus", default=1, type=int,
                             help="number of gpus to train on")
-        parser.add_argument("--num_workers", default=8, type=int,
-                            help="num of workers per GPU")
         parser.add_argument("--max_epochs", default=100, type=int,
                             help="number of total epochs to run")
         parser.add_argument("--max_steps", default=-1, type=int,
                             help="max steps")
         parser.add_argument("--batch_size", default=256, type=int,
                             help="batch size per gpu")
-        parser.add_argument("--warmup_epochs", default=10, type=int,
-                            help="number of warmup epochs")
-        parser.add_argument("--fp32", default=True, action=BooleanOptionalAction,
-                            help="use fp32 or fp16")
+        parser.add_argument("--num_workers", default=4, type=int,
+                            help="num of workers per GPU")
         parser.add_argument("--fast_dev_run", default=False, type=int)
+        parser.add_argument("--fp16", default=False, action='store_true',
+                            help="use fp16")
 
-        # fine-tuner params
-        parser.add_argument("--position", default=True, action=BooleanOptionalAction)
-        parser.add_argument("--mlp_dropout", type=float, default=0.0)
-        parser.add_argument("--attention_dropout", type=float, default=0.0)
-        parser.add_argument("--path_dropout", type=float, default=0.0)
-        parser.add_argument("--head_dropout", type=float, default=0.0)
-        parser.add_argument("--optimizer", type=str, default="sgd")
-        parser.add_argument("--exclude_bn_bias", default=True, action=BooleanOptionalAction)
-        parser.add_argument("--learning_rate", type=float, default=0.1)
-        parser.add_argument("--weight_decay", type=float, default=1e-6)
-        parser.add_argument("--layer_decay", type=float, default=1.0)
-        parser.add_argument("--mixup_alpha", type=float, default=0.0)
-        parser.add_argument("--cutmix_alpha", type=float, default=0.0)
-        parser.add_argument("--label_smoothing", type=float, default=0.0)
-        parser.add_argument("--nesterov", type=bool, default=False)
-        parser.add_argument("--scheduler_type", type=str, default="warmup-anneal")
-        parser.add_argument("--gamma", type=float, default=0.1)
-        parser.add_argument("--start_lr", type=float, default=1e-6)
-        parser.add_argument("--final_lr", type=float, default=1e-6)
+        # data params
+        parser.add_argument("--dataset", default="imagenet", type=str,
+                            help="dataset")
+        parser.add_argument("--lmdb_25pct", default=False, action='store_true',
+                            help="use dedicated 25%% LMDB dataset")
+        parser.add_argument("--lmdb", default=False, action='store_true',
+                            help="use LMDB dataset")
+        parser.add_argument("--data_dir", default="dataset", type=str,
+                            help="path to dataset")
+        parser.add_argument("--protocol", default="linear", type=str,
+                            choices=("linear", "finetune"),
+                            help="evalution protocol")
+        parser.add_argument("--sample_pct", default=100, type=int,
+                            help="%% of labels for training")
+        parser.add_argument("--ckpt_path", required=True, type=str,
+                            help="path to ckpt")
+
+        # regularization
+        parser.add_argument("--layer_decay", default=1., type=float,
+                            help="layer-wise decay")
+        parser.add_argument("--mlp_drop_rate", default=0., type=float,
+                            help="mlp dropout rate")
+        parser.add_argument("--attention_drop_rate", default=0., type=float,
+                            help="attention dropout rate")
+        parser.add_argument("--drop_path_rate", default=0., type=float,
+                            help="path dropout rate")
+        parser.add_argument("--linear_head_drop_rate", default=0., type=float,
+                            help="linear head dropout rate")
+        parser.add_argument("--mixup_alpha", default=0., type=float,
+                            help="mixup alpha")
+        parser.add_argument("--cutmix_alpha", default=0., type=float,
+                            help="cutmix alpha")
+        parser.add_argument("--label_smoothing", default=0., type=float,
+                            help="label smoothing ratio")
+
+        # optimizer
+        parser.add_argument("--optimizer", default="adamw", type=str,
+                            help="choose between SGD, Adam, and AdamW")
+        parser.add_argument("--learning_rate", default=1e-3, type=float,
+                            help="base learning rate")
+        parser.add_argument("--nesterov", default=False, type=bool,
+                            help="SGD Nesterov flag")
+        parser.add_argument("--weight_decay", default=0.05, type=float,
+                            help="weight decay")
+        parser.add_argument("--exclude_bn_bias", default=True,
+                            action=BooleanOptionalAction,
+                            help="exclude bn/ln/bias from weight decay")
+        parser.add_argument("--scheduler_type", default="warmup-anneal", type=str,
+                            help="choose between step, cosine, and warmup-anneal")
+        parser.add_argument("--decay_epochs", default=(60, 80), type=float,
+                            help="multi-step decay epochs")
+        parser.add_argument("--gamma", default=0.1, type=float,
+                            help="multi-step decay rate")
+        parser.add_argument("--warmup_epochs", type=int, default=10,
+                            help="number of warmup epochs")
+        parser.add_argument("--start_lr", default=1e-6, type=float,
+                            help="start learning rate")
+        parser.add_argument("--final_lr", default=1e-6, type=float,
+                            help="final learning rate")
 
         return parser
 
@@ -316,35 +339,30 @@ if __name__ == "__main__":
         pretrained.num_heads,
         pretrained.mlp_ratio,
         pretrained.proj_dim,
-        drop_rate=args.mlp_dropout,
-        attention_drop_rate=args.attention_dropout,
-        drop_path_rate=args.path_dropout,
+        drop_rate=args.mlp_drop_rate,
+        attention_drop_rate=args.attention_drop_rate,
+        drop_path_rate=args.drop_path_rate,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
+        weight_sharing=pretrained.weight_sharing,
     )
     pretrained.load_state_dict(pretained_state_dict)
 
-    if args.label_pct < 100:
-        if args.dataset == "imagenet":
-            dm = FewShotImagenetDataModule(args.data_dir,
-                                           label_pct=args.label_pct,
-                                           batch_size=args.batch_size,
-                                           num_workers=args.num_workers)
-        else:
-            raise NotImplementedError(f"Unimplemented few-shot dataset: {args.dataset}")
+    if args.dataset == "imagenet":
+        dm = build_imagenet(args.sample_pct, args.lmdb, args.lmdb_25pct)
+    elif args.dataset == "cifar10":
+        dm = CIFAR10DataModule
+    elif args.dataset == "cifar100":
+        dm = CIFAR100DataModule
+    elif args.dataset == "flowers102":
+        dm = Flowers102DataModule
+    elif args.dataset == "oxford_iiit_pet":
+        dm = OxfordIIITPetDataModule
     else:
-        if args.dataset == "imagenet":
-            dm = ImagenetDataModule
-        elif args.dataset == "cifar10":
-            dm = CIFAR10DataModule
-        elif args.dataset == "cifar100":
-            dm = CIFAR100DataModule
-        elif args.dataset == "flowers102":
-            dm = Flowers102DataModule
-        elif args.dataset == "oxford_iiit_pet":
-            dm = OxfordIIITPetDataModule
-        else:
-            raise NotImplementedError(f"Unimplemented dataset: {args.dataset}")
-        dm = dm(data_dir=args.data_dir, batch_size=args.batch_size, num_workers=args.num_workers)
+        raise NotImplementedError(f"Unimplemented dataset: {args.dataset}")
+    dm = dm(data_dir=args.data_dir,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers)
+    args.num_classes = dm.num_classes
 
     dm.train_transforms = transforms.Compose([
         transforms.RandomResizedCrop(pretrained.img_size),
@@ -360,22 +378,22 @@ if __name__ == "__main__":
         protocol=args.protocol,
         dataset=args.dataset,
         img_size=pretrained.img_size,
-        position=args.position,
         backbone=pretrained.siamese_net,
         in_features=pretrained.embed_dim,
-        num_classes=dm.num_classes,
+        num_classes=args.num_classes,
         epochs=args.max_epochs,
-        dropout=args.head_dropout,
-        optim=args.optimizer,
-        exclude_bn_bias=args.exclude_bn_bias,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
+        dropout=args.linear_head_drop_rate,
         layer_decay=args.layer_decay,
         mixup_alpha=args.mixup_alpha,
         cutmix_alpha=args.cutmix_alpha,
         label_smoothing=args.label_smoothing,
+        optim=args.optimizer,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
         nesterov=args.nesterov,
+        exclude_bn_bias=args.exclude_bn_bias,
         scheduler_type=args.scheduler_type,
+        decay_epochs=args.decay_epochs,
         gamma=args.gamma,
         warmup_epochs=args.warmup_epochs,
         start_lr=args.start_lr,
@@ -399,7 +417,7 @@ if __name__ == "__main__":
         strategy="ddp" if args.gpus > 1 else None,
         sync_batchnorm=True if args.gpus > 1 else False,
         track_grad_norm=2 if args.track_grad else -1,
-        precision=32 if args.fp32 else 16,
+        precision=16 if args.fp16 else 32,
         callbacks=callbacks,
         logger=logger,
         log_every_n_steps=args.log_steps,
