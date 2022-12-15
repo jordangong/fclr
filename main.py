@@ -70,7 +70,9 @@ class SimCLR(LightningModule):
         self.jitter_strength = jitter_strength
 
         # ResNet params
+        self.img_size = img_size
         self.layers = layers
+        self.embed_dim = embed_dim
 
         # SimCLR params
         self.ema_momentum = ema_momentum
