@@ -194,9 +194,8 @@ class RandMaskedSimCLR(LightningModule):
         return x
 
     def forward_multi_crop(self, img):
-        # Concatenate crop with the same size, augment, and forward
-        img_sizes = torch.tensor([i.size(-1) for i in img])
-        end_indices = img_sizes.unique_consecutive(return_counts=True)[-1].cumsum(0)
+        # Concatenate crop with the same size and mask ratio, augment, and forward
+        end_indices = torch.tensor(self.num_crops).cumsum(0)
         start_indices = torch.cat((torch.tensor([0]), end_indices[:-1]))
         for i, (start_index, end_index) in enumerate(zip(start_indices, end_indices)):
             # Assume global crop at first
